@@ -1,0 +1,10 @@
+[flake8]
+ignore =
+    E501
+
+exclude =
+   */migrations/*,
+   ./.heroku/,
+   ./routable/settings/*,
+
+max-complexity = 10

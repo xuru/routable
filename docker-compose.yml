@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+  web:
+    container_name: routable_api
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000 --settings=routable.settings.local
+    restart: always
+    volumes:
+      - .:/code
+    ports:
+      - "8000:8000"

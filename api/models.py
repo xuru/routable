@@ -41,9 +41,23 @@ class Item(BaseModel):
     )
 
     amount = models.DecimalField(max_digits=8, decimal_places=2)
-    state = models.CharField(default=STATE_PROCESSING, max_length=32, choices=STATE_CHOICES, help_text='The state of the payment')
+    state = models.CharField(default=STATE_PROCESSING, max_length=32, choices=STATE_CHOICES,
+                             help_text='The state of the payment')
 
-    # There would also be originating bank ForeignKey, destination bank ForeignKey, etc...
+    def refund(self):
+        trans = Transaction(item=self, status=Transaction.STATUS_REFUNDING, location=Transaction.LOCATION_ROUTABLE)
+        trans.save()
+        return trans
+
+    def fix(self):
+        trans = Transaction(item=self, status=Transaction.STATUS_FIXING, location=Transaction.LOCATION_ROUTABLE)
+        trans.save()
+        return trans
+
+    def error(self):
+        trans = Transaction(item=self, status=Transaction.STATUS_ERROR, location=Transaction.LOCATION_ROUTABLE)
+        trans.save()
+        return trans
 
     def update_state(self, state):
         self.state = state
@@ -60,11 +74,17 @@ class Transaction(BaseModel):
     STATUS_PROCESSING = 'processing'
     STATUS_COMPLETED = 'completed'
     STATUS_ERROR = 'error'
+    STATUS_REFUNDING = 'refunding'
+    STATUS_REFUNDED = 'refunded'
+    STATUS_FIXING = 'fixing'
 
     STATUS_CHOICES = (
         (STATUS_PROCESSING, 'Processing'),
         (STATUS_COMPLETED, 'Completed'),
-        (STATUS_ERROR, 'Error')
+        (STATUS_ERROR, 'Error'),
+        (STATUS_REFUNDING, 'Refunding'),
+        (STATUS_REFUNDED, 'Refunded'),
+        (STATUS_FIXING, 'Fixing')
     )
 
     LOCATION_ORIGIN = "origination_bank"
@@ -81,20 +101,38 @@ class Transaction(BaseModel):
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, help_text='The status of the transaction')
     location = models.CharField(max_length=32, choices=LOCATION_CHOICES, help_text='The location of the transaction')
 
-    def get_next_transaction_from_state(self, default_to_success=True):
+    @staticmethod
+    def get_active_transaction(pk):
+        return Transaction.objects.select_related().filter(item__id=pk).order_by('-updated_at')[0]
+
+    def get_next_transaction_from_state(self, save_transaction=True):
         """
-        Return a new transaction in the next state and location.  If default_to_success is true, it will end in a completed
-        status, or error if default_to_success is false.
-        :param default_to_success: Whether or not to end in success or failure if at the end of the state chain.
+        Return a new transaction in the next automatic state and location. Please note that 'refund',
+        'fix' and 'error' states are user initiated states and handled separately.
+
+        :param save_transaction: Whether or not to save the transaction before returning it. Defaults to true.
         :return: Transaction
         """
+        trans = None
+        # The starting state of our transaction
         if self.status == self.STATUS_PROCESSING and self.location == self.LOCATION_ORIGIN:
-            return Transaction(item=self.item, status=self.STATUS_PROCESSING, location=self.LOCATION_ROUTABLE)
+            trans = Transaction(item=self.item, status=self.STATUS_PROCESSING, location=self.LOCATION_ROUTABLE)
+
+        # If we are successful with the destination, put it in to a success status, else, error
         elif self.status == self.STATUS_PROCESSING and self.location == self.LOCATION_ROUTABLE:
-            if default_to_success is True:
-                return Transaction(item=self.item, status=self.STATUS_COMPLETED, location=self.LOCATION_DESTINATION)
-            else:
-                return Transaction(item=self.item, status=self.STATUS_ERROR, location=self.LOCATION_ROUTABLE)
+            trans = Transaction(item=self.item, status=self.STATUS_COMPLETED, location=self.LOCATION_DESTINATION)
+
+        # We are fixing this transaction, so move it back into processing so we can try again
+        elif self.status == self.STATUS_FIXING and self.location == self.LOCATION_ROUTABLE:
+            trans = Transaction(item=self.item, status=self.STATUS_PROCESSING, location=self.LOCATION_ROUTABLE)
+
+        # We are refunding this transaction, so move it back to origin and mark it refunded
+        elif self.status == self.STATUS_REFUNDING and self.location == self.LOCATION_ROUTABLE:
+            trans = Transaction(item_id=self.item.id, status=self.STATUS_REFUNDED, location=self.LOCATION_ORIGIN)
+
+        if trans and save_transaction is True:
+            trans.save()
+        return trans
 
     def save(self, force_insert=False, force_update=False, using=None, update_fields=None):
         """
@@ -106,15 +144,18 @@ class Transaction(BaseModel):
         :param update_fields:
         :return:
         """
-        if self.status == self.STATUS_COMPLETED:
+        # transition item to resolved state
+        if self.status in [self.STATUS_COMPLETED, self.STATUS_REFUNDED]:
             self.item.update_state(Item.STATE_RESOLVED)
 
+        # transition item to error state
         elif self.status == self.STATUS_ERROR:
             self.item.update_state(Item.STATE_ERROR)
 
-        elif self.status == self.STATUS_PROCESSING:
-            if self.item.state == Item.STATE_ERROR:
-                self.item.update_state(Item.STATE_CORRECTING)
+        # transition item from ERROR to CORRECTING
+        elif self.status in [self.STATUS_PROCESSING, self.STATUS_REFUNDING, self.STATUS_FIXING] and \
+                self.item.state == Item.STATE_ERROR:
+            self.item.update_state(Item.STATE_CORRECTING)
 
         super().save(force_insert, force_update, using, update_fields)
 

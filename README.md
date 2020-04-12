@@ -5,7 +5,7 @@
 Pull the git repo
 - git clone "https://github.com/xuru/routable"
 	
-Requires python version 3.5 or higher
+Requires python version 3.5 or higher (only tested on 3.7)
 
 ### Assumptions:
 Here is the original [documentation](documentation.pdf). I did not add any kind of authentication

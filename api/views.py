@@ -39,7 +39,7 @@ class ItemView(viewsets.ModelViewSet):
         :param kwargs: Key word arguments
         :return: Response
         """
-        trans = Transaction.objects.select_related().filter(item__id=kwargs['id']).order_by('-updated_at')[0]
+        trans = Transaction.get_active_transaction(kwargs['id'])
         return self.move_transaction(trans)
 
     @action(methods=['post'], detail=True)
@@ -51,25 +51,43 @@ class ItemView(viewsets.ModelViewSet):
         :param kwargs: Key word arguments
         :return: Response
         """
-        trans = Transaction.objects.select_related().filter(item__id=kwargs['id']).order_by('-updated_at')[0]
+        trans = Transaction.get_active_transaction(kwargs['id'])
         if trans.status != Transaction.STATUS_PROCESSING or trans.location != Transaction.LOCATION_ROUTABLE:
             return Response(data={
                 "status": "error",
                 "details": "Transactions not in correct state: [{}, {}]".format(trans.status, trans.location)
             }, status=status.HTTP_400_BAD_REQUEST)
-        return self.move_transaction(trans, to_success=False)
+        trans.item.error()
+        return Response(self.get_serializer(trans.item).data)
 
-    def move_transaction(self, trans: Transaction, to_success: bool = True) -> Response:
+    @action(methods=['post'], detail=True)
+    def fix(self, request, *args, **kwargs):
+        """
+        Create an 'fix' transaction if the latest transaction is an error and it's location is 'routable'
+        :param request: The Request object
+        :param args: Arguments
+        :param kwargs: Key word arguments
+        :return: Response
+        """
+        trans: Transaction = Transaction.get_active_transaction(kwargs['id'])
+        if trans.status != Transaction.STATUS_ERROR or trans.location != Transaction.LOCATION_ROUTABLE:
+            return Response(data={
+                "status": "error",
+                "details": "Transactions not in correct state: [{}, {}]".format(trans.status, trans.location)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        trans.item.fix()
+        return Response(self.get_serializer(trans.item).data)
+
+    def move_transaction(self, trans: Transaction) -> Response:
         """
         Gets the next transaction in the state chain, and saves it.  Returns an error response object if not
         in the correct status or locations (see status chart)
         :param trans: Transaction
-        :param to_success: Boolean if it should end in success or error
         :return: Response
         """
-        next_trans = trans.get_next_transaction_from_state(default_to_success=to_success)
+        next_trans = trans.get_next_transaction_from_state()
         if next_trans:
-            next_trans.save()
             return Response(self.get_serializer(next_trans.item).data)
         else:
             return Response(data={
